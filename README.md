@@ -19,7 +19,7 @@ Use a GameCube controller as a mouse and keyboard on Windows. It reads the contr
 | L + R clicked in | Middle click |
 | Start | Turn the controller mouse on / off |
 
-**Keyboard:** pops up when you click into a text field and moves so it doesn't cover what you're typing. While it's open: **B** = Backspace, **X** = Space, **Y** = Shift, **D-pad** = arrow keys. Point at a key and press A (hold A to repeat it).
+**Keyboard:** pops up when you click into a text field and moves so it doesn't cover what you're typing. While it's open, the **D-pad** moves a highlight between keys and **A** types the highlighted key (hold A to repeat it). **B** = Backspace, **X** = Space, **Y** = Shift, **Z** = close. If you move the stick, the highlight hides and A clicks normally again. Press the D-pad to bring it back.
 
 ## Install
 

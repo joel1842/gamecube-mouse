@@ -10,7 +10,8 @@
 //   L + R clicked all the way in = middle click
 //   D-pad up/down = scroll             D-pad left/right = volume down/up
 //
-//   While the keyboard is open: B = Backspace, X = Space, Y = Shift, D-pad = arrow keys.
+//   While the keyboard is open: D-pad = move the highlight, A = type it, B = Backspace, X = Space,
+//   Y = Shift. Moving the stick hides the highlight and A clicks normally again.
 //   The keyboard pops up by itself when you click into a text field (tray menu option), and
 //   places itself so it doesn't cover the field you're typing into.
 //
@@ -54,6 +55,7 @@ namespace GameCubeMouse
                 using (var kb = new ControllerKeyboard())
                 using (var bmp = new Bitmap(kb.Width, kb.Height))
                 {
+                    kb.ShowFocus = true;
                     kb.DrawToBitmap(bmp, new Rectangle(0, 0, kb.Width, kb.Height));
                     bmp.Save(args.Length > 1 ? args[1] : "keyboard.png", System.Drawing.Imaging.ImageFormat.Png);
                 }
@@ -297,12 +299,14 @@ namespace GameCubeMouse
         readonly ScrollButton scrollUp = new ScrollButton(), scrollDown = new ScrollButton();
         readonly HeldKey volDown = new HeldKey(), volUp = new HeldKey();
         readonly HeldKey backspace = new HeldKey(), space = new HeldKey();
-        readonly HeldKey arrowUp = new HeldKey(), arrowDown = new HeldKey(), arrowLeft = new HeldKey(), arrowRight = new HeldKey();
+        readonly HeldKey navUp = new HeldKey(), navDown = new HeldKey(), navLeft = new HeldKey(), navRight = new HeldKey();
         readonly HeldKey[] allKeys;
+        bool navMode, aTyping;           // navMode: the D-pad highlight is showing and A types it
+        double stickTravel;              // cursor movement since the last D-pad press (hides the highlight)
 
         public MouseEngine()
         {
-            allKeys = new[] { volDown, volUp, backspace, space, arrowUp, arrowDown, arrowLeft, arrowRight };
+            allKeys = new[] { volDown, volUp, backspace, space };
         }
 
         public event Action<bool> Toggled;
@@ -310,6 +314,9 @@ namespace GameCubeMouse
         public event Action KeyboardRequested;   // Z
         public event Action ShiftRequested;      // Y while the keyboard is open
         public event Action LeftClicked;         // A let go (used to pop the keyboard up in text fields)
+        public event Action<int> NavRequested;   // D-pad on the keyboard: 0 up, 1 down, 2 left, 3 right
+        public event Action<bool> KeyPressRequested;   // A down / up on the highlighted key
+        public event Action<bool> NavModeChanged;      // show / hide the highlight
 
         public string Status { get { return status; } }
         public bool ControllerConnected { get { return controllerConnected; } }
@@ -449,14 +456,25 @@ namespace GameCubeMouse
                 lastKeyboardMode = typing;
                 ReleaseModeKeys();
                 blocked |= buttons & ModeButtons;      // e.g. B held as right click must be let go before it backspaces
+                SetNavMode(typing);                    // keyboard just opened: the D-pad picks keys
             }
             int on = buttons & ~blocked;
             int pressedNow = on & ~prevOn;
             prevOn = on;
 
-            bool wasLeft = leftDown;
-            SetButton(ref leftDown, (on & BtnA) != 0, Native.MOUSEEVENTF_LEFTDOWN, Native.MOUSEEVENTF_LEFTUP, 0);
-            if (wasLeft && !leftDown) Raise(LeftClicked);
+            // While the keyboard is open, A types the highlighted key, unless the stick has been used since
+            // the last D-pad press: then A is an ordinary click again (to click into another field, etc.).
+            bool aDown = (on & BtnA) != 0;
+            if (aTyping || (typing && navMode && !leftDown))
+            {
+                if (aDown != aTyping) { aTyping = aDown; RaiseBool(KeyPressRequested, aDown); }
+            }
+            else
+            {
+                bool wasLeft = leftDown;
+                SetButton(ref leftDown, aDown, Native.MOUSEEVENTF_LEFTDOWN, Native.MOUSEEVENTF_LEFTUP, 0);
+                if (wasLeft && !leftDown) Raise(LeftClicked);
+            }
             SetButton(ref middleDown, (on & (BtnL | BtnR)) == (BtnL | BtnR), Native.MOUSEEVENTF_MIDDLEDOWN, Native.MOUSEEVENTF_MIDDLEUP, 0);
             if ((pressedNow & BtnZ) != 0) Raise(KeyboardRequested);
 
@@ -465,10 +483,10 @@ namespace GameCubeMouse
                 UpdateKey(backspace, (on & BtnB) != 0, Native.VK_BACK, false, 0.05, dt);
                 UpdateKey(space, (on & BtnX) != 0, Native.VK_SPACE, false, 0.05, dt);
                 if ((pressedNow & BtnY) != 0) Raise(ShiftRequested);
-                UpdateKey(arrowUp, (on & DUp) != 0, Native.VK_UP, true, 0.05, dt);
-                UpdateKey(arrowDown, (on & DDown) != 0, Native.VK_DOWN, true, 0.05, dt);
-                UpdateKey(arrowLeft, (on & DLeft) != 0, Native.VK_LEFT, true, 0.04, dt);
-                UpdateKey(arrowRight, (on & DRight) != 0, Native.VK_RIGHT, true, 0.04, dt);
+                UpdateNav(navUp, (on & DUp) != 0, 0, dt);
+                UpdateNav(navDown, (on & DDown) != 0, 1, dt);
+                UpdateNav(navLeft, (on & DLeft) != 0, 2, dt);
+                UpdateNav(navRight, (on & DRight) != 0, 3, dt);
             }
             else
             {
@@ -498,6 +516,33 @@ namespace GameCubeMouse
         }
 
         static void Raise(Action h) { if (h != null) h(); }
+        static void RaiseBool(Action<bool> h, bool v) { if (h != null) h(v); }
+
+        void SetNavMode(bool value)
+        {
+            stickTravel = 0;
+            if (navMode == value) return;
+            navMode = value;
+            RaiseBool(NavModeChanged, value);
+        }
+
+        // D-pad on the keyboard: move the highlight once per press; held, it keeps moving like a held key.
+        void UpdateNav(HeldKey k, bool pressed, int dir, double dt)
+        {
+            if (!pressed) { k.Down = false; return; }
+            if (!k.Down)
+            {
+                k.Down = true; k.Held = 0; k.NextRepeat = 0.35;
+                bool wasShowing = navMode;
+                SetNavMode(true);
+                if (wasShowing) RaiseNav(dir);       // first press after using the stick just brings the highlight back
+                return;
+            }
+            k.Held += dt;
+            while (k.Held >= k.NextRepeat) { k.NextRepeat += 0.09; RaiseNav(dir); }
+        }
+
+        void RaiseNav(int dir) { var h = NavRequested; if (h != null) h(dir); }
 
         // Injected keys don't auto-repeat by themselves, so a held button repeats here like a real key.
         static void UpdateKey(HeldKey k, bool pressed, ushort vk, bool extended, double interval, double dt)
@@ -547,6 +592,11 @@ namespace GameCubeMouse
             moveX -= mx;
             moveY -= my;
             Native.SendMouse(mx, my, 0, Native.MOUSEEVENTF_MOVE);
+            if (navMode && !aTyping)
+            {
+                stickTravel += Math.Abs(mx) + Math.Abs(my);
+                if (stickTravel > 30) SetNavMode(false);   // using the stick hands A back to clicking
+            }
         }
 
         static void Scroll(ScrollAxis axis, int offset, double dt, uint flag)
@@ -593,6 +643,8 @@ namespace GameCubeMouse
             SetButton(ref forwardDown, false, 0, Native.MOUSEEVENTF_XUP, Native.XBUTTON2);
             foreach (HeldKey k in allKeys)
                 if (k.Down) { k.Down = false; Native.SendKey(k.Vk, true, k.Extended); }
+            navUp.Down = navDown.Down = navLeft.Down = navRight.Down = false;
+            if (aTyping) { aTyping = false; RaiseBool(KeyPressRequested, false); }
             scrollUp.Down = scrollDown.Down = false;
         }
     }
@@ -632,9 +684,10 @@ namespace GameCubeMouse
             "Start:  turn the controller mouse on / off\n\n" +
             "KEYBOARD\n" +
             "It pops up by itself when you click into a text field, and moves out of the way of\n" +
-            "what you're typing into. Point at a key with the stick and press A (hold A to repeat).\n" +
-            "While it's open:  B = Backspace,  X = Space,  Y = Shift,  D-pad = arrow keys.\n" +
-            "The cursor jumps onto the keyboard when it opens, and back to your text when you close it with Z.\n\n" +
+            "what you're typing into. While it's open:\n" +
+            "    D-pad = move the highlight,  A = type the highlighted key (hold to repeat)\n" +
+            "    B = Backspace,  X = Space,  Y = Shift,  Z = close\n" +
+            "Moving the stick hides the highlight so A clicks normally again; press the D-pad to bring it back.\n\n" +
             "Only the controller in port 1 is used.";
 
         public TrayApp()
@@ -717,6 +770,9 @@ namespace GameCubeMouse
             engine.KeyboardRequested += () => Post(ToggleKeyboard);
             engine.ShiftRequested += () => Post(keyboard.ToggleShift);
             engine.LeftClicked += () => Post(OnControllerClick);
+            engine.NavRequested += dir => Post(() => keyboard.Navigate(dir));
+            engine.KeyPressRequested += down => Post(() => keyboard.PressFocused(down));
+            engine.NavModeChanged += on => Post(() => keyboard.ShowFocus = on);
             keyboard.VisibleChanged += delegate { engine.KeyboardMode = keyboard.Visible; };
             keyboard.KeyTyped += navigation =>
             {
@@ -1122,10 +1178,9 @@ namespace GameCubeMouse
         Font charFont, labelFont, titleFont;
         float factor = 1;
         int sizeIndex = 1;
-        Key hover, pressed, homeKey;
-        bool shift, caps, ctrl, placed, autoShown;
-        Point savedCursor;
-        bool hasSavedCursor;
+        Key hover, pressed, homeKey, focus;
+        bool shift, caps, ctrl, placed, autoShown, showFocus;
+        float wantX = -1;                // remembered column for up/down, so zig-zagging through rows stays straight
 
         public event Action<bool> KeyTyped;   // true for Enter / Tab / Esc (focus may move on)
 
@@ -1226,21 +1281,16 @@ namespace GameCubeMouse
             if (Visible) return;
             autoShown = auto;
             if (!placed) PlaceDefault(Screen.FromPoint(Cursor.Position).WorkingArea);
-            savedCursor = Cursor.Position;
-            hasSavedCursor = true;
+            if (focus == null) focus = homeKey;
+            showFocus = true;
             Show();
             Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-            // jump the cursor onto the keyboard so there's no long trip across the screen
-            Cursor.Position = PointToScreen(new Point(homeKey.Bounds.Left + homeKey.Bounds.Width / 2, homeKey.Bounds.Top + homeKey.Bounds.Height / 2));
         }
 
-        // restoreCursor: put the cursor back where it was (on your text) if it's still on the keyboard.
-        public void HideKeyboard(bool restoreCursor)
+        public void HideKeyboard(bool unused)
         {
             if (!Visible) return;
             repeatTimer.Stop();
-            if (restoreCursor && hasSavedCursor && Bounds.Contains(Cursor.Position)) Cursor.Position = savedCursor;
-            hasSavedCursor = false;
             pressed = hover = null;
             shift = ctrl = false;
             autoShown = false;
@@ -1248,6 +1298,64 @@ namespace GameCubeMouse
         }
 
         public void ToggleShift() { if (Visible) { shift = !shift; Invalidate(); } }
+
+        // ---- D-pad navigation ----
+
+        public bool ShowFocus
+        {
+            get { return showFocus; }
+            set
+            {
+                if (focus == null) focus = homeKey;
+                if (showFocus != value) { showFocus = value; Invalidate(); }
+            }
+        }
+
+        static float CenterX(Key k) { return k.X + k.Units / 2; }
+
+        // dir: 0 up, 1 down, 2 left, 3 right. Rows wrap around at the edges.
+        public void Navigate(int dir)
+        {
+            if (!Visible) return;
+            if (focus == null) focus = homeKey;
+            showFocus = true;
+            if (dir >= 2)
+            {
+                var row = keys.FindAll(k => k.Row == focus.Row);
+                int i = row.IndexOf(focus) + (dir == 3 ? 1 : -1);
+                focus = row[(i + row.Count) % row.Count];
+                wantX = CenterX(focus);
+            }
+            else
+            {
+                if (wantX < 0) wantX = CenterX(focus);
+                int targetRow = (focus.Row + (dir == 1 ? 1 : -1) + Rows) % Rows;
+                Key best = null;
+                foreach (Key k in keys)
+                    if (k.Row == targetRow && (best == null || Math.Abs(CenterX(k) - wantX) < Math.Abs(CenterX(best) - wantX)))
+                        best = k;
+                focus = best;
+            }
+            Invalidate();
+        }
+
+        // A on the highlighted key: press now, keep repeating while held (like holding a real key).
+        public void PressFocused(bool down)
+        {
+            if (!down)
+            {
+                if (pressed != null) { repeatTimer.Stop(); pressed = null; Invalidate(); }
+                return;
+            }
+            if (!Visible || focus == null) return;
+            showFocus = true;
+            Key k = focus;
+            pressed = k;
+            Press(k);
+            if (Visible && (k.Kind == Kind.Char || k.Kind == Kind.Special || k.Kind == Kind.Combo)) { repeatTimer.Interval = 450; repeatTimer.Start(); }
+            else pressed = Visible ? k : null;
+            Invalidate();
+        }
 
         void PlaceDefault(Rectangle area)
         {
@@ -1443,7 +1551,7 @@ namespace GameCubeMouse
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            TextRenderer.DrawText(g, "Z hide  ·  B backspace  ·  X space  ·  Y shift  ·  D-pad arrows  ·  drag here to move", titleFont,
+            TextRenderer.DrawText(g, "D-pad pick  ·  A type  ·  B backspace  ·  X space  ·  Y shift  ·  Z close", titleFont,
                 new Rectangle(0, 0, ClientSize.Width, S(TitleHeight - Gap)), Color.FromArgb(150, 150, 162),
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
 
@@ -1453,9 +1561,16 @@ namespace GameCubeMouse
                 bool latched = (k.Kind == Kind.Shift && shift) || (k.Kind == Kind.Caps && caps) || (k.Kind == Kind.Ctrl && ctrl);
                 Color idle = k.Kind == Kind.Char ? CharColor : k.Row == 0 ? ActionColor : SpecialColor;
                 Color fill = k == pressed || latched ? Accent : k == hover ? HoverColor : idle;
+                bool focused = showFocus && k == focus;
+                if (focused && fill != Accent) fill = HoverColor;
                 using (GraphicsPath path = Ui.RoundedRect(k.Bounds, radius))
                 using (var b = new SolidBrush(fill))
+                {
                     g.FillPath(b, path);
+                    if (focused)
+                        using (var pen = new Pen(Color.White, Math.Max(2f, S(3))))
+                            g.DrawPath(pen, path);
+                }
                 TextRenderer.DrawText(g, Label(k), k.Kind == Kind.Char ? charFont : labelFont, k.Bounds,
                     k.Row == 0 ? Color.FromArgb(205, 205, 215) : Color.White,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);

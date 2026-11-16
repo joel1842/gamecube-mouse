@@ -21,6 +21,24 @@ Use a GameCube controller as a mouse and keyboard on Windows. It reads the contr
 
 **Keyboard:** pops up when you click into a text field and moves so it doesn't cover what you're typing. While it's open, the **D-pad** moves a highlight between keys and **A** types the highlighted key (hold A to repeat it). **B** = Backspace, **X** = Space, **Y** = Shift, **Z** = close. If you move the stick, the highlight hides and A clicks normally again. Press the D-pad to bring it back.
 
+## Game mode
+
+When an emulator is running (PCSX2, DuckStation, RPCS3, PPSSPP, RetroArch, Cemu, xemu, Flycast, Ryujinx or Xenia), the mouse turns off by itself and the controller goes to the game as a virtual **Xbox 360 controller**. When the game closes, the mouse comes back. To add another game, put its program name (for example `mygame.exe`) on its own line in `games.txt` next to `GameCubeMouse.exe`.
+
+This needs the free [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) driver (`winget install ViGEm.ViGEmBus`). Without it, the mouse still turns off in games, but the game won't see the controller.
+
+| GameCube | Xbox |
+|---|---|
+| A / B / X / Y | A / X / B / Y (matched by position) |
+| Control stick / C-stick | Left stick / right stick |
+| L / R (analog) | LT / RT |
+| L clicked in | LB |
+| Z | RB |
+| Start | Start |
+| Z + Start | Guide (opens the PCSX2 menu) |
+| Z + X | Back / Select |
+
+While Dolphin is running, GameCube Mouse lets go of the adapter so Dolphin can use it directly.
 ## Install
 
 1. Plug in the adapter (put a Mayflash into Wii U mode).

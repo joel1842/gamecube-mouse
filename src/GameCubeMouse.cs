@@ -19,6 +19,10 @@
 // middleware), on a dedicated high-priority thread that wakes on every USB report (~125 Hz).
 // Each report is turned straight into SendInput calls, which enter Windows' raw input stream.
 //
+// Game mode: while an emulator such as PCSX2 is running, the mouse turns off and the controller is
+// handed to the game as a virtual Xbox 360 controller through the ViGEmBus driver (if installed).
+// While Dolphin is running, the adapter is let go so Dolphin can read it itself.
+//
 // Build with build.cmd (uses the C# compiler that ships with Windows). No other dependencies.
 
 using System;
@@ -270,7 +274,7 @@ namespace GameCubeMouse
 
         // XUSB button bits
         public const ushort Up = 0x0001, Down = 0x0002, Left = 0x0004, Right = 0x0008, Start = 0x0010, Back = 0x0020;
-        public const ushort LB = 0x0100, RB = 0x0200, A = 0x1000, B = 0x2000, X = 0x4000, Y = 0x8000;
+        public const ushort LB = 0x0100, RB = 0x0200, Guide = 0x0400, A = 0x1000, B = 0x2000, X = 0x4000, Y = 0x8000;
 
         SafeFileHandle bus;
         uint serial;
@@ -670,7 +674,7 @@ namespace GameCubeMouse
 
         // GameCube -> Xbox layout, by position: A = A, B = X (left), X = B (right), Y = Y (top),
         // Z = RB, analog L / R = LT / RT, L clicked all the way in also = LB,
-        // Start = Start, Z + Start = Back. Control stick = left stick, C-stick = right stick.
+        // Start = Start, Z + Start = Guide, Z + X = Back. Control stick = left stick, C-stick = right stick.
         void FeedPad(VirtualPad p, byte b1, byte b2, int sx, int sy, int cx, int cy, int lAnalog, int rAnalog)
         {
             int buttons = b1 | (b2 << 8);
@@ -684,8 +688,10 @@ namespace GameCubeMouse
             if ((buttons & DLeft) != 0) x |= VirtualPad.Left;
             if ((buttons & DRight) != 0) x |= VirtualPad.Right;
             if ((buttons & BtnL) != 0) x |= VirtualPad.LB;
-            bool z = (buttons & BtnZ) != 0, start = (buttons & BtnStart) != 0;
-            if (z && start) x |= VirtualPad.Back;
+            // Z works as a shift key: Z + Start = Guide (opens the emulator's menu), Z + X = Back (Select).
+            bool z = (buttons & BtnZ) != 0, start = (buttons & BtnStart) != 0, xBtn = (buttons & BtnX) != 0;
+            if (z && start) x |= VirtualPad.Guide;
+            else if (z && xBtn) { x |= VirtualPad.Back; x = (ushort)(x & ~VirtualPad.B); }
             else
             {
                 if (z) x |= VirtualPad.RB;

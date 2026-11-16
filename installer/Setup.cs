@@ -1,4 +1,4 @@
-// GameCube Mouse setup: a single exe that carries GameCubeMouse.exe inside it.
+﻿// GameCube Mouse setup: a single exe that carries GameCubeMouse.exe inside it.
 // Installs per-user (no admin needed) to %LOCALAPPDATA%\Programs\GameCube Mouse, adds Start menu
 // (and optional desktop) shortcuts, optional start-with-Windows, and an entry in
 // Settings > Apps so it can be uninstalled.   Setup.exe --uninstall removes everything.
@@ -7,6 +7,9 @@ using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Management;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
@@ -23,7 +26,6 @@ namespace GameCubeMouseSetup
         const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameCubeMouse";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string RunName = "GameCubeMouse";
-        public const string ZadigUrl = "https://zadig.akeo.ie/";
 
         static string InstallDir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", AppName); } }
         static string StartMenuLink { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), AppName + ".lnk"); } }
@@ -35,6 +37,7 @@ namespace GameCubeMouseSetup
             Application.EnableVisualStyles();
             bool quiet = Array.IndexOf(args, "--quiet") >= 0;
             if (Array.IndexOf(args, "--uninstall") >= 0) return Uninstall(quiet);
+            if (Array.IndexOf(args, "--install-driver") >= 0) return AdapterDriver.InstallElevated();
             if (quiet) { Install(true, false, false); return 0; }
             Application.Run(new SetupForm());
             return 0;
@@ -126,11 +129,180 @@ namespace GameCubeMouseSetup
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    // The adapter driver. The adapter calls itself a HID device but Windows can't use it as one,
+    // so (like Zadig) we point it at Microsoft's built-in WinUSB driver with a tiny INF. Windows
+    // only accepts a signed driver package, so the INF's catalog is signed with a certificate
+    // made on this PC; its private key is deleted straight after, so it can't sign anything else.
+    // ------------------------------------------------------------------------------------------
+    static class AdapterDriver
+    {
+        public enum State { Ready, NeedsDriver, NotPlugged }
+
+        const string HardwareId = @"USB\VID_057E&PID_0337";
+        const string EnumKey = @"SYSTEM\CurrentControlSet\Enum\USB\VID_057E&PID_0337";
+        const uint INSTALLFLAG_FORCE = 0x1;
+        const int ERROR_NO_SUCH_DEVINST = unchecked((int)0xE000020B);
+
+        public const int ExitOk = 0, ExitNotPlugged = 2, ExitSignFailed = 3, ExitInstallFailed = 4;
+
+        public static string WorkDir { get { return Path.Combine(Path.GetTempPath(), "GameCubeMouseDriver"); } }
+        public static string LogPath { get { return Path.Combine(WorkDir, "install.log"); } }
+
+        [DllImport("newdev.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern bool UpdateDriverForPlugAndPlayDevices(IntPtr hwnd, string hardwareId, string infPath, uint flags, out bool reboot);
+
+        // Ready = already on WinUSB (by us, Zadig or Dolphin). The adapter reports the same serial on
+        // every port, so once set up it stays set up even when unplugged.
+        public static State Check()
+        {
+            bool seen = false;
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(EnumKey))
+                {
+                    if (k != null)
+                        foreach (string inst in k.GetSubKeyNames())
+                            using (RegistryKey d = k.OpenSubKey(inst))
+                            {
+                                if (d == null) continue;
+                                seen = true;
+                                if (string.Equals(d.GetValue("Service") as string, "WinUSB", StringComparison.OrdinalIgnoreCase))
+                                    return State.Ready;
+                            }
+                }
+            }
+            catch { }
+            return seen && IsPresent() ? State.NeedsDriver : State.NotPlugged;
+        }
+
+        static bool IsPresent()
+        {
+            try
+            {
+                using (var s = new ManagementObjectSearcher("SELECT DeviceID FROM Win32_PnPEntity WHERE DeviceID LIKE 'USB\\\\VID_057E&PID_0337%'"))
+                using (ManagementObjectCollection found = s.Get())
+                    return found.Count > 0;
+            }
+            catch { return false; }
+        }
+
+        const string Inf =
+            "; GameCube Controller Adapter (WUP-028) -> Microsoft WinUSB. Written by GameCube Mouse setup.\r\n" +
+            "[Version]\r\n" +
+            "Signature   = \"$Windows NT$\"\r\n" +
+            "Class       = USBDevice\r\n" +
+            "ClassGUID   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}\r\n" +
+            "Provider    = %Provider%\r\n" +
+            "CatalogFile = gcadapter.cat\r\n" +
+            "DriverVer   = 11/15/2026,1.0.0.0\r\n" +
+            "\r\n" +
+            "[Manufacturer]\r\n" +
+            "%Provider% = Devices,NTamd64,NTarm64,NTx86\r\n" +
+            "\r\n" +
+            "[Devices.NTamd64]\r\n%DeviceName% = USB_Install, USB\\VID_057E&PID_0337\r\n" +
+            "[Devices.NTarm64]\r\n%DeviceName% = USB_Install, USB\\VID_057E&PID_0337\r\n" +
+            "[Devices.NTx86]\r\n%DeviceName% = USB_Install, USB\\VID_057E&PID_0337\r\n" +
+            "\r\n" +
+            "[USB_Install]\r\nInclude = winusb.inf\r\nNeeds   = WINUSB.NT\r\n" +
+            "\r\n" +
+            "[USB_Install.Services]\r\nInclude = winusb.inf\r\nNeeds   = WINUSB.NT.Services\r\n" +
+            "\r\n" +
+            "[USB_Install.HW]\r\nAddReg = Dev_AddReg\r\n" +
+            "\r\n" +
+            "[Dev_AddReg]\r\nHKR,,DeviceInterfaceGUIDs,0x10000,\"{6B3C1F0E-2D8A-4C57-9E41-0A6F3B2C7D15}\"\r\n" +
+            "\r\n" +
+            "[Strings]\r\nProvider   = \"GameCube Mouse\"\r\nDeviceName = \"GameCube Controller Adapter\"\r\n";
+
+        // Makes the catalog, a one-off signing certificate, signs, trusts the certificate, deletes its key.
+        const string SignScript = @"
+param([string]$Dir)
+$ErrorActionPreference = 'Stop'
+$subject = 'CN=GameCube Mouse adapter driver (this PC only)'
+$cat = Join-Path $Dir 'gcadapter.cat'
+New-FileCatalog -Path (Join-Path $Dir 'gcadapter.inf') -CatalogFilePath $cat -CatalogVersion 2 | Out-Null
+foreach ($store in 'Root','TrustedPublisher') {
+    Get-ChildItem ""Cert:\LocalMachine\$store"" | Where-Object { $_.Subject -eq $subject } | Remove-Item
+}
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\LocalMachine\My `
+        -KeyExportPolicy NonExportable -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(30)
+try {
+    $sig = Set-AuthenticodeSignature -FilePath $cat -Certificate $cert -HashAlgorithm SHA256
+    if (-not $sig.SignerCertificate) { throw ('signing failed: ' + $sig.StatusMessage) }
+    $public = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 (,$cert.RawData)
+    foreach ($store in 'Root','TrustedPublisher') {
+        $s = New-Object System.Security.Cryptography.X509Certificates.X509Store($store, 'LocalMachine')
+        $s.Open('ReadWrite'); $s.Add($public); $s.Close()
+    }
+} finally {
+    Remove-Item (""Cert:\LocalMachine\My\"" + $cert.Thumbprint) -DeleteKey
+}
+'Signed ' + $cat
+";
+
+        // Runs as administrator (Setup.exe --install-driver). Writes a log next to the files.
+        public static int InstallElevated()
+        {
+            var log = new StringBuilder();
+            int result = ExitInstallFailed;
+            try
+            {
+                if (Directory.Exists(WorkDir)) Directory.Delete(WorkDir, true);
+                Directory.CreateDirectory(WorkDir);
+                string inf = Path.Combine(WorkDir, "gcadapter.inf");
+                File.WriteAllText(inf, Inf, Encoding.ASCII);
+                string script = Path.Combine(WorkDir, "sign.ps1");
+                File.WriteAllText(script, SignScript, Encoding.UTF8);
+
+                var psi = new ProcessStartInfo("powershell.exe",
+                    "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script + "\" -Dir \"" + WorkDir + "\"")
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+                    p.WaitForExit();
+                    log.AppendLine("sign: exit " + p.ExitCode + "\r\n" + output);
+                    if (p.ExitCode != 0) { result = ExitSignFailed; return result; }
+                }
+
+                bool reboot;
+                if (UpdateDriverForPlugAndPlayDevices(IntPtr.Zero, HardwareId, inf, INSTALLFLAG_FORCE, out reboot))
+                {
+                    log.AppendLine("driver installed" + (reboot ? " (restart needed)" : ""));
+                    result = ExitOk;
+                }
+                else
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    log.AppendLine("UpdateDriverForPlugAndPlayDevices failed: 0x" + err.ToString("X8"));
+                    result = err == ERROR_NO_SUCH_DEVINST ? ExitNotPlugged : ExitInstallFailed;
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                log.AppendLine("error: " + ex);
+                return result;
+            }
+            finally
+            {
+                log.AppendLine("result " + result);
+                try { File.WriteAllText(LogPath, log.ToString()); } catch { }
+            }
+        }
+    }
+
     sealed class SetupForm : Form
     {
         readonly CheckBox startup, desktop, launch;
-        readonly Button install, cancel;
-        readonly Label status;
+        readonly Button install, cancel, driverButton;
+        readonly Label status, driverStatus;
+        readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 2000 };
+        bool driverBusy;
+
+        static readonly Color Good = Color.FromArgb(30, 120, 60), Muted = Color.FromArgb(90, 90, 90);
 
         public SetupForm()
         {
@@ -140,37 +312,110 @@ namespace GameCubeMouseSetup
             StartPosition = FormStartPosition.CenterScreen;
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(460, 330);
+            ClientSize = new Size(460, 400);
             BackColor = Color.White;
 
             var title = new Label { Text = "GameCube Mouse", Font = new Font("Segoe UI Semibold", 16f), AutoSize = true, Location = new Point(20, 16) };
             var blurb = new Label
             {
                 Text = "Use a GameCube controller (official or Mayflash adapter, port 1) as a mouse " +
-                       "and keyboard on Windows. Installs just for you, no admin rights needed.",
+                       "and keyboard on Windows. Installs just for you.",
                 Location = new Point(22, 58), Size = new Size(416, 44)
             };
-            var driver = new LinkLabel
-            {
-                Text = "Needs the WinUSB driver on the adapter (one-time, via Zadig).",
-                Location = new Point(22, 106), Size = new Size(416, 22)
-            };
-            driver.Links.Add(driver.Text.IndexOf("Zadig"), 5);
-            driver.LinkClicked += delegate { Process.Start(Setup.ZadigUrl); };
 
-            startup = new CheckBox { Text = "Start with Windows", Checked = true, AutoSize = true, Location = new Point(24, 142) };
-            desktop = new CheckBox { Text = "Desktop shortcut", AutoSize = true, Location = new Point(24, 170) };
-            launch = new CheckBox { Text = "Start GameCube Mouse when setup finishes", Checked = true, AutoSize = true, Location = new Point(24, 198) };
-            status = new Label { Location = new Point(22, 236), Size = new Size(416, 40), ForeColor = Color.FromArgb(90, 90, 90) };
+            startup = new CheckBox { Text = "Start with Windows", Checked = true, AutoSize = true, Location = new Point(24, 112) };
+            desktop = new CheckBox { Text = "Desktop shortcut", AutoSize = true, Location = new Point(24, 140) };
+            launch = new CheckBox { Text = "Start GameCube Mouse when setup finishes", Checked = true, AutoSize = true, Location = new Point(24, 168) };
 
-            install = new Button { Text = "Install", Size = new Size(100, 32), Location = new Point(232, 284) };
-            cancel = new Button { Text = "Cancel", Size = new Size(100, 32), Location = new Point(340, 284) };
+            var driverTitle = new Label { Text = "Adapter driver", Font = new Font("Segoe UI Semibold", 10f), AutoSize = true, Location = new Point(22, 208) };
+            driverStatus = new Label { Location = new Point(22, 232), Size = new Size(416, 40), ForeColor = Muted };
+            driverButton = new Button { Text = "Set up adapter driver", Size = new Size(190, 32), Location = new Point(22, 274), FlatStyle = FlatStyle.System };
+            driverButton.Click += delegate { InstallDriver(); };
+
+            status = new Label { Location = new Point(22, 316), Size = new Size(416, 34), ForeColor = Muted };
+            install = new Button { Text = "Install", Size = new Size(100, 32), Location = new Point(232, 356) };
+            cancel = new Button { Text = "Cancel", Size = new Size(100, 32), Location = new Point(340, 356) };
             install.Click += delegate { DoInstall(); };
             cancel.Click += delegate { Close(); };
             AcceptButton = install;
             CancelButton = cancel;
 
-            Controls.AddRange(new Control[] { title, blurb, driver, startup, desktop, launch, status, install, cancel });
+            Controls.AddRange(new Control[] { title, blurb, startup, desktop, launch, driverTitle, driverStatus, driverButton, status, install, cancel });
+
+            poll.Tick += delegate { RefreshDriver(); };
+            Shown += delegate
+            {
+                const int BCM_SETSHIELD = 0x160C;
+                SendMessage(driverButton.Handle, BCM_SETSHIELD, IntPtr.Zero, (IntPtr)1);   // UAC shield on the button
+                RefreshDriver();
+                poll.Start();
+            };
+        }
+
+        [DllImport("user32.dll")]
+        static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        void RefreshDriver()
+        {
+            if (driverBusy) return;
+            switch (AdapterDriver.Check())
+            {
+                case AdapterDriver.State.Ready:
+                    driverStatus.ForeColor = Good;
+                    driverStatus.Text = "✓ The adapter is set up. Nothing else to do.";
+                    driverButton.Visible = false;
+                    break;
+                case AdapterDriver.State.NeedsDriver:
+                    driverStatus.ForeColor = Color.Black;
+                    driverStatus.Text = "Adapter found. It needs a one-time driver setup (Windows will ask for permission).";
+                    driverButton.Visible = true;
+                    driverButton.Enabled = true;
+                    break;
+                default:
+                    driverStatus.ForeColor = Muted;
+                    driverStatus.Text = "Plug the GameCube adapter into a USB port to set up its driver. " +
+                                        "(Mayflash: switch it to Wii U mode.)";
+                    driverButton.Visible = true;
+                    driverButton.Enabled = false;
+                    break;
+            }
+        }
+
+        void InstallDriver()
+        {
+            driverBusy = true;
+            driverButton.Enabled = false;
+            driverStatus.ForeColor = Muted;
+            driverStatus.Text = "Setting up the adapter driver...";
+            string self = Assembly.GetExecutingAssembly().Location;
+            var worker = new Thread(() =>
+            {
+                int code;
+                try
+                {
+                    using (Process p = Process.Start(new ProcessStartInfo(self, "--install-driver") { Verb = "runas", UseShellExecute = true }))
+                    {
+                        p.WaitForExit();
+                        code = p.ExitCode;
+                    }
+                }
+                catch (System.ComponentModel.Win32Exception) { code = -1; }   // permission prompt was declined
+                BeginInvoke((Action)(() => DriverFinished(code)));
+            }) { IsBackground = true };
+            worker.Start();
+        }
+
+        void DriverFinished(int code)
+        {
+            driverBusy = false;
+            RefreshDriver();
+            if (code == AdapterDriver.ExitOk) return;
+            driverButton.Enabled = true;
+            driverStatus.ForeColor = Color.Firebrick;
+            driverStatus.Text =
+                code == -1 ? "Driver setup was cancelled. Click the button to try again." :
+                code == AdapterDriver.ExitNotPlugged ? "The adapter was unplugged. Plug it in and try again." :
+                "Driver setup didn't work (details in " + AdapterDriver.LogPath + "). You can use Zadig instead, see the README.";
         }
 
         void DoInstall()
@@ -181,7 +426,7 @@ namespace GameCubeMouseSetup
             try
             {
                 Setup.Install(startup.Checked, desktop.Checked, launch.Checked);
-                status.ForeColor = Color.FromArgb(30, 120, 60);
+                status.ForeColor = Good;
                 status.Text = "Installed. Look for the cursor icon next to the clock. Uninstall any time from Settings > Apps.";
                 cancel.Text = "Close";
             }
@@ -191,6 +436,12 @@ namespace GameCubeMouseSetup
                 status.Text = "Install failed: " + ex.Message;
                 install.Enabled = true;
             }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) poll.Dispose();
+            base.Dispose(disposing);
         }
     }
 }

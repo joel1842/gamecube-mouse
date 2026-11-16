@@ -23,8 +23,11 @@ Use a GameCube controller as a mouse and keyboard on Windows. It reads the contr
 
 ## Install
 
-1. Download **GameCubeMouse-Setup.exe** from [Releases](../../releases/latest) and run it. You don't need admin rights.
-2. One-time driver step: run [Zadig](https://zadig.akeo.ie/), pick **WUP-028** (Options → List All Devices), choose **WinUSB** and click *Replace Driver*. This is the same driver Dolphin uses.
-3. Plug the controller into port 1 and press **Start**.
+1. Plug in the adapter (put a Mayflash into Wii U mode).
+2. Download **GameCubeMouse-Setup.exe** from [Releases](../../releases/latest) and run it.
+3. If setup says the adapter needs a driver, click **Set up adapter driver** and allow the Windows prompt. This one-time step points the adapter at Microsoft's built-in WinUSB driver, the same thing Zadig does for Dolphin. If you've used the adapter with Dolphin before, it's already done.
+4. Plug the controller into port 1 and press **Start**.
+
+If the driver setup fails, you can do it by hand with [Zadig](https://zadig.akeo.ie/): pick **WUP-028** (Options → List All Devices), choose **WinUSB**, then click *Replace Driver*.
 
 To uninstall, go to Settings → Apps → GameCube Mouse. To build it yourself, run `build.cmd`. It uses the C# compiler that comes with Windows.

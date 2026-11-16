@@ -27,12 +27,4 @@ Use a GameCube controller as a mouse and keyboard on Windows. It reads the contr
 2. One-time driver step: run [Zadig](https://zadig.akeo.ie/), pick **WUP-028** (Options → List All Devices), choose **WinUSB** and click *Replace Driver*. This is the same driver Dolphin uses.
 3. Plug the controller into port 1 and press **Start**.
 
-To uninstall, go to Settings → Apps → GameCube Mouse.
-
-## Make it your own
-
-This project is open source under the [MIT license](LICENSE). Use it, fork it, and change it however you like.
-
-- The whole program is one file: [`src/GameCubeMouse.cs`](src/GameCubeMouse.cs). Button mappings are in `MouseEngine.Process`, and the keyboard layout is in the `ControllerKeyboard` constructor.
-- Run `build.cmd` to build `dist\GameCubeMouse.exe` and the installer. It uses the C# compiler that comes with Windows, so you don't need Visual Studio or any SDK.
-- Pull requests and issues are welcome.
+To uninstall, go to Settings → Apps → GameCube Mouse. To build it yourself, run `build.cmd`. It uses the C# compiler that comes with Windows.

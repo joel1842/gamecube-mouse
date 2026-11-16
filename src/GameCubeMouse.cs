@@ -1,4 +1,4 @@
-﻿// GameCube Mouse
+// GameCube Mouse
 // Turns the controller in PORT 1 of a GameCube USB adapter (Nintendo WUP-028 or a Mayflash
 // adapter in Wii U mode, using the WinUSB/Zadig driver) into a mouse.
 //
@@ -185,7 +185,7 @@ namespace GameCubeMouse
             try { var g = new Guid(s.Trim()); if (!list.Contains(g)) list.Add(g); } catch { }
         }
 
-        static IEnumerable<string> EnumerateInterfaces(Guid guid)
+        public static List<string> EnumerateInterfaces(Guid guid)
         {
             var result = new List<string>();
             IntPtr set = Native.SetupDiGetClassDevs(ref guid, IntPtr.Zero, IntPtr.Zero, Native.DIGCF_PRESENT | Native.DIGCF_DEVICEINTERFACE);
@@ -258,6 +258,112 @@ namespace GameCubeMouse
     }
 
     // ------------------------------------------------------------------------------------------
+    // Virtual Xbox 360 controller through the ViGEmBus driver (talked to directly with
+    // DeviceIoControl, so no ViGEmClient.dll is needed). Used in game mode so emulators and
+    // games see the GameCube controller as an ordinary XInput pad.
+    // ------------------------------------------------------------------------------------------
+    sealed class VirtualPad : IDisposable
+    {
+        static readonly Guid BusInterface = new Guid("96E42B22-F5E9-42F8-B043-ED0F932F014F");
+        const uint IoctlPlugin = 0x2AA004, IoctlUnplug = 0x2AA008, IoctlCheckVersion = 0x2AA00C,
+                   IoctlWaitReady = 0x2AA010, IoctlSubmitXusb = 0x2AA808;
+
+        // XUSB button bits
+        public const ushort Up = 0x0001, Down = 0x0002, Left = 0x0004, Right = 0x0008, Start = 0x0010, Back = 0x0020;
+        public const ushort LB = 0x0100, RB = 0x0200, A = 0x1000, B = 0x2000, X = 0x4000, Y = 0x8000;
+
+        SafeFileHandle bus;
+        uint serial;
+        readonly byte[] report = new byte[20];
+        readonly byte[] lastSent = new byte[20];
+        bool sentOnce;
+
+        VirtualPad(SafeFileHandle bus, uint serial) { this.bus = bus; this.serial = serial; }
+
+
+
+        public static VirtualPad Plug(out string error)
+        {
+            var paths = GCAdapter.EnumerateInterfaces(BusInterface);
+            if (paths.Count == 0) { error = "ViGEmBus driver not installed"; return null; }
+            foreach (string path in paths)
+            {
+                SafeFileHandle h = Native.CreateFile(path, Native.GENERIC_READ | Native.GENERIC_WRITE,
+                    Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING,
+                    Native.FILE_ATTRIBUTE_NORMAL, IntPtr.Zero);
+                if (h.IsInvalid) { h.Dispose(); continue; }
+
+                var version = new byte[8];
+                BitConverter.GetBytes(8u).CopyTo(version, 0);
+                BitConverter.GetBytes((ushort)1).CopyTo(version, 4);
+                if (!Ioctl(h, IoctlCheckVersion, version)) { h.Dispose(); continue; }
+
+                for (uint s = 1; s <= 16; s++)
+                {
+                    var plugin = new byte[16];
+                    BitConverter.GetBytes(16u).CopyTo(plugin, 0);
+                    BitConverter.GetBytes(s).CopyTo(plugin, 4);
+                    // TargetType 0 = Xbox 360 wired; vendor/product 0 = driver default (045E:028E)
+                    if (!Ioctl(h, IoctlPlugin, plugin)) continue;
+                    var wait = new byte[8];
+                    BitConverter.GetBytes(8u).CopyTo(wait, 0);
+                    BitConverter.GetBytes(s).CopyTo(wait, 4);
+                    Ioctl(h, IoctlWaitReady, wait);   // older drivers don't know this one; that's fine
+                    error = null;
+                    return new VirtualPad(h, s);
+                }
+                h.Dispose();
+            }
+            error = "Couldn't create a virtual controller";
+            return null;
+        }
+
+        static bool Ioctl(SafeFileHandle h, uint code, byte[] data)
+        {
+            uint returned;
+            return Native.DeviceIoControl(h, code, data, (uint)data.Length, null, 0, out returned, IntPtr.Zero);
+        }
+
+        public bool Submit(ushort buttons, byte lt, byte rt, short lx, short ly, short rx, short ry)
+        {
+            BitConverter.GetBytes(20u).CopyTo(report, 0);
+            BitConverter.GetBytes(serial).CopyTo(report, 4);
+            BitConverter.GetBytes(buttons).CopyTo(report, 8);
+            report[10] = lt; report[11] = rt;
+            BitConverter.GetBytes(lx).CopyTo(report, 12);
+            BitConverter.GetBytes(ly).CopyTo(report, 14);
+            BitConverter.GetBytes(rx).CopyTo(report, 16);
+            BitConverter.GetBytes(ry).CopyTo(report, 18);
+            bool same = sentOnce;
+            for (int i = 8; i < 20 && same; i++) same = report[i] == lastSent[i];
+            if (same) return true;
+            if (!Ioctl(bus, IoctlSubmitXusb, report)) return false;
+            Buffer.BlockCopy(report, 0, lastSent, 0, 20);
+            sentOnce = true;
+            return true;
+        }
+
+        public void Dispose()
+        {
+            if (bus == null) return;
+            var unplug = new byte[8];
+            BitConverter.GetBytes(8u).CopyTo(unplug, 0);
+            BitConverter.GetBytes(serial).CopyTo(unplug, 4);
+            Ioctl(bus, IoctlUnplug, unplug);
+            bus.Dispose();
+            bus = null;
+        }
+    }
+
+    // What the reader thread should do with the controller right now.
+    enum GameMode
+    {
+        None,          // normal: controller mouse
+        VirtualPad,    // a game/emulator is running: mouse off, controller fed to it as an Xbox pad
+        Released,      // a program that reads the adapter itself (Dolphin) is running: let go of it
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Controller -> mouse translation (runs on its own thread)
     // ------------------------------------------------------------------------------------------
     sealed class MouseEngine
@@ -285,6 +391,7 @@ namespace GameCubeMouse
 
         volatile bool enabled = true, running, recenterRequested, controllerConnected, keyboardMode;
         volatile int speedIndex = 1;
+        volatile int gameMode;           // GameMode, set by the UI from which programs are running
         volatile string status = "Starting...";
         readonly ManualResetEvent stopSignal = new ManualResetEvent(false);
         Thread thread;
@@ -344,6 +451,11 @@ namespace GameCubeMouse
             }
         }
         public void Recenter() { recenterRequested = true; }
+        public GameMode GameMode
+        {
+            get { return (GameMode)gameMode; }
+            set { gameMode = (int)value; }
+        }
 
         public void Start()
         {
@@ -371,6 +483,8 @@ namespace GameCubeMouse
         void Run()
         {
             GCAdapter adapter = null;
+            VirtualPad pad = null;
+            double padRetryAt = 0;
             var report = new byte[GCAdapter.ReportLength];
             var clock = Stopwatch.StartNew();
             double last = 0;
@@ -378,6 +492,31 @@ namespace GameCubeMouse
             {
                 while (running)
                 {
+                    GameMode mode = GameMode;
+
+                    // Game mode: plug in / unplug the virtual Xbox controller.
+                    if (mode != GameMode.VirtualPad && pad != null) { pad.Dispose(); pad = null; }
+                    if (mode == GameMode.VirtualPad && pad == null && clock.Elapsed.TotalSeconds >= padRetryAt)
+                    {
+                        string padError;
+                        ReleaseAll();
+                        pad = VirtualPad.Plug(out padError);
+                        if (pad == null) { padRetryAt = clock.Elapsed.TotalSeconds + 5; padStatus = "Game mode: mouse off (" + padError + ")"; }
+                        else padStatus = "Game mode: controller goes to the game";
+                        statusDirty = true;
+                    }
+                    this.pad = pad;
+
+                    // A program that reads the adapter itself (Dolphin) is running: let go of it.
+                    if (mode == GameMode.Released)
+                    {
+                        if (adapter != null) { adapter.Dispose(); adapter = null; }
+                        ReleaseAll();
+                        SetStatus(false, "Paused: Dolphin is using the adapter");
+                        if (stopSignal.WaitOne(1000)) break;
+                        continue;
+                    }
+
                     if (adapter == null)
                     {
                         string error;
@@ -414,6 +553,8 @@ namespace GameCubeMouse
             finally
             {
                 ReleaseAll();
+                if (pad != null) pad.Dispose();
+                this.pad = null;
                 if (adapter != null) adapter.Dispose();
             }
         }
@@ -442,6 +583,18 @@ namespace GameCubeMouse
             if (!calibrated && NearCenter(sx) && NearCenter(sy)) { centerX = sx; centerY = sy; calibrated = true; }
             if (!cCalibrated && NearCenter(cx) && NearCenter(cy)) { cCenterX = cx; cCenterY = cy; cCalibrated = true; }
             if (!tCalibrated && lAnalog < 90 && rAnalog < 90) { lRest = lAnalog; rRest = rAnalog; tCalibrated = true; }
+
+            if (GameMode == GameMode.VirtualPad)
+            {
+                ReleaseAll();
+                prevStart = true;                      // Start doesn't toggle the mouse while gaming
+                statusDirty = true;                    // put the normal status back once game mode ends
+                SetStatus(true, padStatus);
+                VirtualPad p = pad;
+                if (p != null) FeedPad(p, b1, b2, sx, sy, cx, cy, lAnalog, rAnalog);
+                return;
+            }
+            if (statusDirty) { statusDirty = false; SetStatus(true, "Controller connected in port 1"); }
 
             bool start = (b2 & 0x01) != 0;
             if (start && !prevStart) Enabled = !enabled;
@@ -509,6 +662,65 @@ namespace GameCubeMouse
                 Scroll(vertical, cy - cCenterY, dt, Native.MOUSEEVENTF_WHEEL);     // C up = scroll up
                 Scroll(horizontal, cx - cCenterX, dt, Native.MOUSEEVENTF_HWHEEL);  // C right = scroll right
             }
+        }
+
+        volatile VirtualPad pad;
+        volatile bool statusDirty;
+        volatile string padStatus = "";
+
+        // GameCube -> Xbox layout, by position: A = A, B = X (left), X = B (right), Y = Y (top),
+        // Z = RB, analog L / R = LT / RT, L clicked all the way in also = LB,
+        // Start = Start, Z + Start = Back. Control stick = left stick, C-stick = right stick.
+        void FeedPad(VirtualPad p, byte b1, byte b2, int sx, int sy, int cx, int cy, int lAnalog, int rAnalog)
+        {
+            int buttons = b1 | (b2 << 8);
+            ushort x = 0;
+            if ((buttons & BtnA) != 0) x |= VirtualPad.A;
+            if ((buttons & BtnB) != 0) x |= VirtualPad.X;
+            if ((buttons & BtnX) != 0) x |= VirtualPad.B;
+            if ((buttons & BtnY) != 0) x |= VirtualPad.Y;
+            if ((buttons & DUp) != 0) x |= VirtualPad.Up;
+            if ((buttons & DDown) != 0) x |= VirtualPad.Down;
+            if ((buttons & DLeft) != 0) x |= VirtualPad.Left;
+            if ((buttons & DRight) != 0) x |= VirtualPad.Right;
+            if ((buttons & BtnL) != 0) x |= VirtualPad.LB;
+            bool z = (buttons & BtnZ) != 0, start = (buttons & BtnStart) != 0;
+            if (z && start) x |= VirtualPad.Back;
+            else
+            {
+                if (z) x |= VirtualPad.RB;
+                if (start) x |= VirtualPad.Start;
+            }
+
+            byte lt = 0, rt = 0;
+            if (tCalibrated)
+            {
+                lt = (byte)Math.Round(255 * PadTrigger(lAnalog, lRest));
+                rt = (byte)Math.Round(255 * PadTrigger(rAnalog, rRest));
+            }
+            if ((buttons & BtnL) != 0) lt = 255;
+            if ((buttons & BtnR) != 0) rt = 255;
+
+            short lx = 0, ly = 0, rx = 0, ry = 0;
+            if (calibrated) { lx = PadAxis(sx - centerX, StickRange); ly = PadAxis(sy - centerY, StickRange); }
+            if (cCalibrated) { rx = PadAxis(cx - cCenterX, CStickRange); ry = PadAxis(cy - cCenterY, CStickRange); }
+
+            p.Submit(x, lt, rt, lx, ly, rx, ry);
+        }
+
+        static short PadAxis(int offset, int range)
+        {
+            const int dead = 4;
+            if (Math.Abs(offset) <= dead) return 0;
+            double v = (Math.Abs(offset) - dead) / (double)(range - dead);
+            v = Math.Min(1.0, v) * Math.Sign(offset);
+            return (short)Math.Round(v * 32767);
+        }
+
+        static double PadTrigger(int value, int rest)
+        {
+            const int dead = 6, travel = 180;
+            return Math.Max(0.0, Math.Min(1.0, (value - rest - dead) / (double)travel));
         }
 
         static double Pressure(int value, int rest)
@@ -668,6 +880,16 @@ namespace GameCubeMouse
         readonly List<ToolStripMenuItem> speedItems = new List<ToolStripMenuItem>();
         readonly List<ToolStripMenuItem> sizeItems = new List<ToolStripMenuItem>();
         bool autoKeyboard, ignoreNextClick;
+        readonly System.Windows.Forms.Timer gameTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+
+        // Running any of these switches the controller over to the game as a virtual Xbox controller
+        // and turns the mouse off. Extra names (one per line, without .exe) can go in games.txt next
+        // to GameCubeMouse.exe.
+        static readonly string[] PadGames = {
+            "pcsx2-qt", "pcsx2", "duckstation-qt-x64-ReleaseLTCG", "duckstation-nogui-x64-ReleaseLTCG",
+            "rpcs3", "PPSSPPWindows64", "retroarch", "Cemu", "xemu", "flycast", "Ryujinx", "xenia", "xenia_canary" };
+        // These read the GameCube adapter themselves, so we just let go of it.
+        static readonly string[] AdapterGames = { "Dolphin", "DolphinQt2", "Slippi Dolphin" };
 
         const string ControlsText =
             "Control stick:  move the cursor\n" +
@@ -717,13 +939,14 @@ namespace GameCubeMouse
             }
             var keyboardMenu = new ToolStripMenuItem("On-screen keyboard");
             keyboardMenu.DropDownItems.Add(new ToolStripMenuItem("Show / hide   (Z)", null, delegate { ToggleKeyboard(); }));
-            itemAutoKeyboard = new ToolStripMenuItem("Pop up when I click a text field", null, delegate
+            itemAutoKeyboard = new ToolStripMenuItem("Auto keyboard (text fields)", null, delegate
             {
                 autoKeyboard = !autoKeyboard;
                 Settings.SaveInt("AutoKeyboard", autoKeyboard ? 1 : 0);
+                if (!autoKeyboard && keyboard.Visible && keyboard.AutoShown) keyboard.HideKeyboard(false);
                 RefreshChecks();
             });
-            keyboardMenu.DropDownItems.Add(itemAutoKeyboard);
+            itemAutoKeyboard.ToolTipText = "Automatically show the on-screen keyboard when you click a text field with the controller.";
             keyboardMenu.DropDownItems.Add(new ToolStripSeparator());
             for (int i = 0; i < ControllerKeyboard.SizeNames.Length; i++)
             {
@@ -757,7 +980,7 @@ namespace GameCubeMouse
             var menu = new ContextMenuStrip();
             menu.Items.AddRange(new ToolStripItem[] {
                 itemEnabled, itemStatus, new ToolStripSeparator(),
-                speedMenu, keyboardMenu, recenter, controls, itemStartup, new ToolStripSeparator(), exit });
+                speedMenu, keyboardMenu, itemAutoKeyboard, recenter, controls, itemStartup, new ToolStripSeparator(), exit });
 
             tray = new NotifyIcon { Icon = iconWaiting, Text = "GameCube Mouse", ContextMenuStrip = menu, Visible = true };
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) engine.Enabled = !engine.Enabled; };
@@ -783,10 +1006,58 @@ namespace GameCubeMouse
                 watcher.Request(navigation ? FocusWatcher.Reason.Navigated : FocusWatcher.Reason.Typed);
             };
 
+            gameTimer.Tick += delegate { CheckGames(); };
+            CheckGames();
+            gameTimer.Start();
+
             RefreshChecks();
             RefreshUi();
             engine.Start();
             osd.Flash("GameCube Mouse is running  -  Start toggles it", OnColor);
+        }
+
+        string currentGame;
+
+        void CheckGames()
+        {
+            string game = null;
+            GameMode mode = GameMode.None;
+            foreach (string name in AdapterGames)
+                if (IsRunning(name)) { game = name; mode = GameMode.Released; break; }
+            if (game == null)
+            {
+                var names = new List<string>(PadGames);
+                try
+                {
+                    string extra = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "games.txt");
+                    if (File.Exists(extra))
+                        foreach (string line in File.ReadAllLines(extra))
+                        {
+                            string n = line.Trim();
+                            if (n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) n = n.Substring(0, n.Length - 4);
+                            if (n.Length > 0 && !n.StartsWith("#")) names.Add(n);
+                        }
+                }
+                catch { }
+                foreach (string name in names)
+                    if (IsRunning(name)) { game = name; mode = GameMode.VirtualPad; break; }
+            }
+            if (mode == engine.GameMode && game == currentGame) return;
+            bool was = engine.GameMode != GameMode.None;
+            currentGame = game;
+            engine.GameMode = mode;
+            if (keyboard.Visible && mode != GameMode.None) keyboard.HideKeyboard(false);
+            RefreshUi();
+            if (mode != GameMode.None && !was) osd.Flash("Game mode  -  controller mouse off", OffColor);
+            else if (mode == GameMode.None && was) osd.Flash("Game closed  -  controller mouse back", OnColor);
+        }
+
+        static bool IsRunning(string name)
+        {
+            Process[] list = null;
+            try { list = Process.GetProcessesByName(name); return list.Length > 0; }
+            catch { return false; }
+            finally { if (list != null) foreach (var p in list) p.Dispose(); }
         }
 
         void Post(Action action)
@@ -853,8 +1124,10 @@ namespace GameCubeMouse
         void RefreshUi()
         {
             bool ready = engine.ControllerConnected;
-            tray.Icon = !ready ? iconWaiting : engine.Enabled ? iconOn : iconOff;
-            string state = !ready ? engine.Status : engine.Enabled ? "ON (Start to turn off)" : "OFF (Start to turn on)";
+            bool gaming = engine.GameMode != GameMode.None;
+            tray.Icon = !ready ? iconWaiting : (engine.Enabled && !gaming) ? iconOn : iconOff;
+            string state = gaming ? "game mode (" + currentGame + ")"
+                         : !ready ? engine.Status : engine.Enabled ? "ON (Start to turn off)" : "OFF (Start to turn on)";
             string tip = "GameCube Mouse: " + state;
             tray.Text = tip.Length > 63 ? tip.Substring(0, 63) : tip;
             itemEnabled.Checked = engine.Enabled;
@@ -863,10 +1136,15 @@ namespace GameCubeMouse
 
         protected override void ExitThreadCore()
         {
+            gameTimer.Stop();
+            gameTimer.Dispose();
             engine.Stop();
             watcher.Dispose();
             tray.Visible = false;
             tray.Dispose();
+            iconOn.Dispose();
+            iconOff.Dispose();
+            iconWaiting.Dispose();
             keyboard.Dispose();
             osd.Dispose();
             base.ExitThreadCore();
@@ -880,16 +1158,39 @@ namespace GameCubeMouse
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.Clear(Color.Transparent);
-                    if (filled) using (var b = new SolidBrush(color)) g.FillEllipse(b, 1, 1, 30, 30);
-                    else using (var p = new Pen(color, 3f)) g.DrawEllipse(p, 2.5f, 2.5f, 27f, 27f);
-                    var arrow = new[] {
-                        new PointF(10, 6), new PointF(10, 24), new PointF(14.5f, 20), new PointF(17.5f, 26.5f),
-                        new PointF(20.5f, 25), new PointF(17.5f, 18.8f), new PointF(23, 18.8f) };
-                    using (var b = new SolidBrush(filled ? Color.White : color)) g.FillPolygon(b, arrow);
+                    // Compact GameCube silhouette, with its offset sticks and distinctive face buttons.
+                    using (var shell = new GraphicsPath())
+                    {
+                        shell.AddBezier(3, 10, 5, 5, 10, 6, 12, 8);
+                        shell.AddBezier(12, 8, 15, 9, 17, 9, 20, 8);
+                        shell.AddBezier(20, 8, 24, 5, 29, 7, 30, 12);
+                        shell.AddBezier(30, 12, 32, 20, 31, 27, 27, 26);
+                        shell.AddBezier(27, 26, 24, 25, 23, 21, 21, 21);
+                        shell.AddLine(21, 21, 11, 21);
+                        shell.AddBezier(11, 21, 8, 23, 7, 28, 3, 26);
+                        shell.AddBezier(3, 26, 0, 25, 1, 16, 3, 10);
+                        shell.CloseFigure();
+                        using (var b = new SolidBrush(filled ? color : Color.FromArgb(65, color))) g.FillPath(b, shell);
+                        using (var p = new Pen(Color.FromArgb(222, 217, 244), 1.2f)) g.DrawPath(p, shell);
+                    }
+                    using (var b = new SolidBrush(Color.FromArgb(234, 234, 241))) g.FillEllipse(b, 5, 9, 7, 7);
+                    using (var b = new SolidBrush(Color.FromArgb(80, 77, 98))) g.FillEllipse(b, 7, 11, 3, 3);
+                    using (var p = new Pen(Color.FromArgb(224, 224, 235), 2f))
+                    { g.DrawLine(p, 10, 18, 10, 23); g.DrawLine(p, 7.5f, 20.5f, 12.5f, 20.5f); }
+                    using (var b = new SolidBrush(filled ? Color.FromArgb(75, 215, 139) : Color.Silver)) g.FillEllipse(b, 22, 11, 6, 6);
+                    using (var b = new SolidBrush(filled ? Color.FromArgb(242, 92, 92) : Color.Silver)) g.FillEllipse(b, 18.5f, 15, 3, 3);
+                    using (var b = new SolidBrush(Color.FromArgb(222, 222, 235)))
+                    { g.FillEllipse(b, 26, 8, 4, 2); g.FillEllipse(b, 19, 8, 2, 4); g.FillEllipse(b, 14.5f, 12, 3, 2); }
+                    using (var b = new SolidBrush(filled ? Color.FromArgb(251, 208, 65) : Color.Silver)) g.FillEllipse(b, 18, 19, 5, 5);
                 }
-                return Icon.FromHandle(bmp.GetHicon());
+                IntPtr handle = bmp.GetHicon();
+                try { using (var icon = Icon.FromHandle(handle)) return (Icon)icon.Clone(); }
+                finally { DestroyIcon(handle); }
             }
         }
+
+        [DllImport("user32.dll")]
+        static extern bool DestroyIcon(IntPtr icon);
     }
 
     // Small click-through banner that never takes focus away from what you're doing.
@@ -1782,6 +2083,10 @@ namespace GameCubeMouse
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[] inBuffer, uint inSize,
+            byte[] outBuffer, uint outSize, out uint returned, IntPtr overlapped);
 
         [DllImport("winusb.dll", SetLastError = true)]
         public static extern bool WinUsb_Initialize(SafeFileHandle device, out IntPtr handle);

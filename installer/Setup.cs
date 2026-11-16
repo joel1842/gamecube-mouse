@@ -19,7 +19,7 @@ namespace GameCubeMouseSetup
         const string AppName = "GameCube Mouse";
         const string ExeName = "GameCubeMouse.exe";
         const string UninstallerName = "Uninstall.exe";
-        const string Version = "2.0.0";
+        const string Version = "1.0.0";
         const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameCubeMouse";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string RunName = "GameCubeMouse";

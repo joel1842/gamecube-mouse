@@ -319,6 +319,7 @@ namespace GameCubeMouse
         public event Action<bool> NavModeChanged;      // show / hide the highlight
 
         public string Status { get { return status; } }
+        public bool LeftHeld { get { return leftDown; } }   // A is holding the left mouse button down right now
         public bool ControllerConnected { get { return controllerConnected; } }
         public int SpeedIndex
         {
@@ -455,7 +456,7 @@ namespace GameCubeMouse
             {
                 lastKeyboardMode = typing;
                 ReleaseModeKeys();
-                blocked |= buttons & ModeButtons;      // e.g. B held as right click must be let go before it backspaces
+                blocked |= buttons & (ModeButtons | BtnA);   // e.g. A held on Enter must not turn into a click once the keyboard closes
                 SetNavMode(typing);                    // keyboard just opened: the D-pad picks keys
             }
             int on = buttons & ~blocked;
@@ -666,7 +667,7 @@ namespace GameCubeMouse
         readonly ToolStripMenuItem itemEnabled, itemStatus, itemStartup, itemAutoKeyboard;
         readonly List<ToolStripMenuItem> speedItems = new List<ToolStripMenuItem>();
         readonly List<ToolStripMenuItem> sizeItems = new List<ToolStripMenuItem>();
-        bool autoKeyboard;
+        bool autoKeyboard, ignoreNextClick;
 
         const string ControlsText =
             "Control stick:  move the cursor\n" +
@@ -774,6 +775,8 @@ namespace GameCubeMouse
             engine.KeyPressRequested += down => Post(() => keyboard.PressFocused(down));
             engine.NavModeChanged += on => Post(() => keyboard.ShowFocus = on);
             keyboard.VisibleChanged += delegate { engine.KeyboardMode = keyboard.Visible; };
+            // Closed by clicking Enter/Hide with the cursor: that click's release must not pop it back open.
+            keyboard.ClosedByUser += () => { ignoreNextClick = engine.LeftHeld; };
             keyboard.KeyTyped += navigation =>
             {
                 // after Enter/Tab/Esc focus may have moved on; after ordinary typing the caret may have moved under the keyboard
@@ -808,6 +811,7 @@ namespace GameCubeMouse
 
         void OnControllerClick()
         {
+            if (ignoreNextClick) { ignoreNextClick = false; return; }   // the click that pressed Enter / Hide
             if (keyboard.Visible && keyboard.Bounds.Contains(Cursor.Position)) return;   // typing on the keyboard itself
             if (!autoKeyboard && !keyboard.Visible) return;
             watcher.Request(FocusWatcher.Reason.Click);
@@ -1151,7 +1155,7 @@ namespace GameCubeMouse
     // It never takes focus, so every key goes to the window you were already typing in.
     sealed class ControllerKeyboard : Form
     {
-        enum Kind { Char, Special, Combo, Text, Shift, Caps, Ctrl, Hide, Move }
+        enum Kind { Char, Special, Combo, Shift, Caps, Ctrl, Hide }
 
         sealed class Key
         {
@@ -1194,10 +1198,9 @@ namespace GameCubeMouse
             BackColor = Color.FromArgb(24, 24, 28);
             DoubleBuffered = true;
 
-            Row(0, Special("Esc", 0x1B, 1.25f, false), Combo("Select all", 'A', 1.5f), Combo("Cut", 'X', 1.25f),
-                Combo("Copy", 'C', 1.25f), Combo("Paste", 'V', 1.25f), Combo("Undo", 'Z', 1.25f),
-                Special("Home", 0x24, 1.25f, true), Special("End", 0x23, 1.25f, true), Special("Del", 0x2E, 1.25f, true),
-                TextKey(".com", 1.5f), Modifier(Kind.Move, "Move ⇅", 2f));
+            Row(0, Special("Esc", 0x1B, 2f, false), Combo("Select all", 'A', 2f), Combo("Cut", 'X', 1.5f),
+                Combo("Copy", 'C', 1.5f), Combo("Paste", 'V', 1.5f), Combo("Undo", 'Z', 1.5f),
+                Special("Home", 0x24, 1.5f, true), Special("End", 0x23, 1.5f, true), Special("Del", 0x2E, 2f, true));
             Row(1, Chars("`1234567890-=", "~!@#$%^&*()_+"), Special("Backspace", 0x08, 2f, false));
             Row(2, Special("Tab", 0x09, 1.5f, false), Chars("qwertyuiop[]", "QWERTYUIOP{}"), Wide("\\", "|", 1.5f));
             Row(3, Modifier(Kind.Caps, "Caps", 1.75f), Chars("asdfghjkl;'", "ASDFGHJKL:\""), Special("Enter", 0x0D, 2.25f, false));
@@ -1270,7 +1273,6 @@ namespace GameCubeMouse
         static Key[] Special(string label, ushort vk, float units, bool ext) { return new[] { new Key { Kind = Kind.Special, Normal = label, Vk = vk, Units = units, Extended = ext } }; }
         static Key[] Arrow(string label, ushort vk) { return new[] { new Key { Kind = Kind.Special, Normal = label, Vk = vk, Extended = true } }; }
         static Key[] Combo(string label, char letter, float units) { return new[] { new Key { Kind = Kind.Combo, Normal = label, Vk = letter, Units = units } }; }
-        static Key[] TextKey(string text, float units) { return new[] { new Key { Kind = Kind.Text, Normal = text, Units = units } }; }
         static Key[] Modifier(Kind kind, string label, float units) { return new[] { new Key { Kind = kind, Normal = label, Units = units } }; }
 
         // ---- showing, hiding and placement ----
@@ -1287,9 +1289,12 @@ namespace GameCubeMouse
             Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0, Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
         }
 
-        public void HideKeyboard(bool unused)
+        public event Action ClosedByUser;    // Enter, Hide or Z (not the automatic close)
+
+        public void HideKeyboard(bool byUser)
         {
             if (!Visible) return;
+            if (byUser) { var h = ClosedByUser; if (h != null) h(); }
             repeatTimer.Stop();
             pressed = hover = null;
             shift = ctrl = false;
@@ -1388,15 +1393,6 @@ namespace GameCubeMouse
             placed = true;
         }
 
-        void FlipSide()
-        {
-            Rectangle area = Screen.FromRectangle(Bounds).WorkingArea;
-            int m = S(16);
-            bool atBottom = Top + Height / 2 > area.Top + area.Height / 2;
-            MoveTo(Left, atBottom ? area.Top + m : area.Bottom - Height - m);
-            placed = true;
-        }
-
         // Moves the window; if the cursor is on the keyboard it moves along, so you don't lose your place.
         void MoveTo(int x, int y)
         {
@@ -1427,7 +1423,6 @@ namespace GameCubeMouse
                 case Kind.Caps: caps = !caps; typed = false; break;
                 case Kind.Ctrl: ctrl = !ctrl; typed = false; break;
                 case Kind.Hide: HideKeyboard(true); return;
-                case Kind.Move: FlipSide(); typed = false; break;
                 case Kind.Special:
                     SendWithModifiers(k.Vk, k.Extended);
                     shift = ctrl = false;
@@ -1437,10 +1432,6 @@ namespace GameCubeMouse
                 case Kind.Combo:
                     ctrl = true;
                     SendWithModifiers(k.Vk, false);
-                    shift = ctrl = false;
-                    break;
-                case Kind.Text:
-                    foreach (char c in k.Normal) Native.SendUnicode(c);
                     shift = ctrl = false;
                     break;
                 case Kind.Char:

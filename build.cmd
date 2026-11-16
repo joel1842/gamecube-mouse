@@ -7,21 +7,15 @@ set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
 for %%F in ("%CSC%") do set "FW=%%~dpF"
 if not exist dist mkdir dist
-set "REFS=/lib:"%FW%WPF" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:UIAutomationClient.dll /r:UIAutomationTypes.dll /r:WindowsBase.dll"
 
-rem The normal program.
-"%CSC%" /nologo /target:winexe /optimize+ /out:dist\GameCubeMouse.exe %REFS% src\GameCubeMouse.cs
-if errorlevel 1 goto failed
-
-rem The same program marked uiAccess, for the optional "works in admin prompts" install.
-"%CSC%" /nologo /target:winexe /optimize+ /out:dist\GameCubeMouse-uia.exe %REFS% ^
-  /win32manifest:installer\uiaccess.manifest src\GameCubeMouse.cs
+"%CSC%" /nologo /target:winexe /optimize+ /out:dist\GameCubeMouse.exe /lib:"%FW%WPF" ^
+  /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:UIAutomationClient.dll /r:UIAutomationTypes.dll /r:WindowsBase.dll ^
+  src\GameCubeMouse.cs
 if errorlevel 1 goto failed
 
 "%CSC%" /nologo /target:winexe /optimize+ /out:dist\GameCubeMouse-Setup.exe ^
-  /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Management.dll ^
-  /resource:dist\GameCubeMouse.exe,GameCubeMouse.exe /resource:dist\GameCubeMouse-uia.exe,GameCubeMouse-uia.exe ^
-  installer\Setup.cs
+  /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
+  /resource:dist\GameCubeMouse.exe,GameCubeMouse.exe installer\Setup.cs
 if errorlevel 1 goto failed
 
 echo Built dist\GameCubeMouse.exe and dist\GameCubeMouse-Setup.exe

@@ -23,30 +23,14 @@ Use a GameCube controller as a mouse and keyboard on Windows. It reads the contr
 
 ## Game mode
 
-When an emulator is running (PCSX2, DuckStation, RPCS3, PPSSPP, RetroArch, Cemu, xemu, Flycast, Ryujinx or Xenia), the mouse turns off by itself and the controller goes to the game as a virtual **Xbox 360 controller**. When the game closes, the mouse comes back. To add another game, put its program name (for example `mygame.exe`) on its own line in `games.txt` next to `GameCubeMouse.exe`.
+When a game or emulator is running (Dolphin, PCSX2, DuckStation, RPCS3, PPSSPP, RetroArch, Cemu, xemu, Flycast, Ryujinx or Xenia), GameCube Mouse steps aside: the mouse turns off and it lets go of the adapter, so your emulator or controller setup can use the controller however you've configured it. When the game closes, the mouse comes back. To add another game, put its program name (for example `mygame.exe`) on its own line in `games.txt` next to `GameCubeMouse.exe`.
 
-This needs the free [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases) driver (`winget install ViGEm.ViGEmBus`). Without it, the mouse still turns off in games, but the game won't see the controller.
-
-| GameCube | Xbox |
-|---|---|
-| A / B / X / Y | A / X / B / Y (matched by position) |
-| Control stick / C-stick | Left stick / right stick |
-| L / R (analog) | LT / RT |
-| L clicked in | LB |
-| Z | RB |
-| Start | Start |
-| Z + Start | Guide (opens the PCSX2 menu) |
-| Z + X | Back / Select |
-
-While Dolphin is running, GameCube Mouse lets go of the adapter so Dolphin can use it directly.
 ## Install
 
 1. Plug in the adapter (put a Mayflash into Wii U mode).
 2. Download **GameCubeMouse-Setup.exe** from [Releases](../../releases/latest) and run it.
 3. If setup says the adapter needs a driver, click **Set up adapter driver** and allow the Windows prompt. This one-time step points the adapter at Microsoft's built-in WinUSB driver, the same thing Zadig does for Dolphin. If you've used the adapter with Dolphin before, it's already done.
 4. Plug the controller into port 1 and press **Start**.
-5. Optional, for game mode: click **Install ViGEmBus** in setup. ViGEmBus is a free driver that creates the virtual Xbox controller that emulators see. Without it, everything else still works.
-
 If the driver setup fails, you can do it by hand with [Zadig](https://zadig.akeo.ie/): pick **WUP-028** (Options → List All Devices), choose **WinUSB**, then click *Replace Driver*.
 
 To uninstall, go to Settings → Apps → GameCube Mouse. To build it yourself, run `build.cmd`. It uses the C# compiler that comes with Windows.

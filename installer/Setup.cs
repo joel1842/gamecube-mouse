@@ -294,13 +294,56 @@ try {
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Game mode needs ViGEmBus (by Nefarius) to create the virtual Xbox controller. Setup can fetch
+    // its official installer; the file's SHA-256 is pinned so nothing else ever gets run.
+    // ------------------------------------------------------------------------------------------
+    static class GameModeDriver
+    {
+        const string Url = "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe";
+        const string Sha256 = "89220A7865076B342892F98865F3499FB7C4CFD673159E89D352C360FD014C6A";
+
+        public static bool IsInstalled
+        {
+            get
+            {
+                try { using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\ViGEmBus")) return k != null; }
+                catch { return false; }
+            }
+        }
+
+        // Downloads, checks the hash, runs the ViGEmBus installer (it asks for permission itself) and waits.
+        // Returns null on success, or a message saying what went wrong.
+        public static string Install()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "ViGEmBus_1.22.0_setup.exe");
+            try
+            {
+                System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+                using (var web = new System.Net.WebClient()) web.DownloadFile(Url, path);
+                string hash;
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                using (FileStream fs = File.OpenRead(path))
+                    hash = BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "");
+                if (!string.Equals(hash, Sha256, StringComparison.OrdinalIgnoreCase))
+                    return "The download didn't match the expected file, so it wasn't run.";
+                using (Process p = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }))
+                    p.WaitForExit();
+                return IsInstalled ? null : "ViGEmBus wasn't installed. Click the button to try again.";
+            }
+            catch (System.ComponentModel.Win32Exception) { return "Cancelled. Click the button to try again."; }
+            catch (Exception ex) { return "Couldn't install ViGEmBus: " + ex.Message; }
+            finally { try { File.Delete(path); } catch { } }
+        }
+    }
+
     sealed class SetupForm : Form
     {
         readonly CheckBox startup, desktop, launch;
-        readonly Button install, cancel, driverButton;
-        readonly Label status, driverStatus;
+        readonly Button install, cancel, driverButton, gameButton;
+        readonly Label status, driverStatus, gameStatus;
         readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 2000 };
-        bool driverBusy;
+        bool driverBusy, gameBusy;
 
         static readonly Color Good = Color.FromArgb(30, 120, 60), Muted = Color.FromArgb(90, 90, 90);
 
@@ -312,7 +355,7 @@ try {
             StartPosition = FormStartPosition.CenterScreen;
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(460, 400);
+            ClientSize = new Size(460, 510);
             BackColor = Color.White;
 
             var title = new Label { Text = "GameCube Mouse", Font = new Font("Segoe UI Semibold", 16f), AutoSize = true, Location = new Point(20, 16) };
@@ -332,28 +375,78 @@ try {
             driverButton = new Button { Text = "Set up adapter driver", Size = new Size(190, 32), Location = new Point(22, 274), FlatStyle = FlatStyle.System };
             driverButton.Click += delegate { InstallDriver(); };
 
-            status = new Label { Location = new Point(22, 316), Size = new Size(416, 34), ForeColor = Muted };
-            install = new Button { Text = "Install", Size = new Size(100, 32), Location = new Point(232, 356) };
-            cancel = new Button { Text = "Cancel", Size = new Size(100, 32), Location = new Point(340, 356) };
+            var gameTitle = new Label { Text = "Game mode (optional)", Font = new Font("Segoe UI Semibold", 10f), AutoSize = true, Location = new Point(22, 318) };
+            gameStatus = new Label { Location = new Point(22, 342), Size = new Size(416, 40), ForeColor = Muted };
+            gameButton = new Button { Text = "Install ViGEmBus", Size = new Size(190, 32), Location = new Point(22, 384), FlatStyle = FlatStyle.System };
+            gameButton.Click += delegate { InstallGameDriver(); };
+
+            status = new Label { Location = new Point(22, 426), Size = new Size(416, 34), ForeColor = Muted };
+            install = new Button { Text = "Install", Size = new Size(100, 32), Location = new Point(232, 466) };
+            cancel = new Button { Text = "Cancel", Size = new Size(100, 32), Location = new Point(340, 466) };
             install.Click += delegate { DoInstall(); };
             cancel.Click += delegate { Close(); };
             AcceptButton = install;
             CancelButton = cancel;
 
-            Controls.AddRange(new Control[] { title, blurb, startup, desktop, launch, driverTitle, driverStatus, driverButton, status, install, cancel });
+            Controls.AddRange(new Control[] { title, blurb, startup, desktop, launch, driverTitle, driverStatus, driverButton, gameTitle, gameStatus, gameButton, status, install, cancel });
 
-            poll.Tick += delegate { RefreshDriver(); };
+            poll.Tick += delegate { RefreshDriver(); RefreshGame(); };
             Shown += delegate
             {
                 const int BCM_SETSHIELD = 0x160C;
-                SendMessage(driverButton.Handle, BCM_SETSHIELD, IntPtr.Zero, (IntPtr)1);   // UAC shield on the button
+                SendMessage(driverButton.Handle, BCM_SETSHIELD, IntPtr.Zero, (IntPtr)1);   // UAC shield on the buttons
+                SendMessage(gameButton.Handle, BCM_SETSHIELD, IntPtr.Zero, (IntPtr)1);
                 RefreshDriver();
+                RefreshGame();
                 poll.Start();
             };
         }
 
         [DllImport("user32.dll")]
         static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        void RefreshGame()
+        {
+            if (gameBusy) return;
+            if (GameModeDriver.IsInstalled)
+            {
+                gameStatus.ForeColor = Good;
+                gameStatus.Text = "✓ Ready. When an emulator like PCSX2 is running, the controller becomes an Xbox controller.";
+                gameButton.Visible = false;
+            }
+            else
+            {
+                gameStatus.ForeColor = Muted;
+                gameStatus.Text = "To play emulator games with the controller, install the free ViGEmBus driver. " +
+                                  "It creates a virtual Xbox controller.";
+                gameButton.Visible = true;
+                gameButton.Enabled = true;
+            }
+        }
+
+        void InstallGameDriver()
+        {
+            gameBusy = true;
+            gameButton.Enabled = false;
+            gameStatus.ForeColor = Muted;
+            gameStatus.Text = "Downloading and installing ViGEmBus...";
+            var worker = new Thread(() =>
+            {
+                string error = GameModeDriver.Install();
+                BeginInvoke((Action)(() =>
+                {
+                    gameBusy = false;
+                    RefreshGame();
+                    if (error != null)
+                    {
+                        gameStatus.ForeColor = Color.Firebrick;
+                        gameStatus.Text = error;
+                        gameButton.Enabled = true;
+                    }
+                }));
+            }) { IsBackground = true };
+            worker.Start();
+        }
 
         void RefreshDriver()
         {

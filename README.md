@@ -45,6 +45,7 @@ While Dolphin is running, GameCube Mouse lets go of the adapter so Dolphin can u
 2. Download **GameCubeMouse-Setup.exe** from [Releases](../../releases/latest) and run it.
 3. If setup says the adapter needs a driver, click **Set up adapter driver** and allow the Windows prompt. This one-time step points the adapter at Microsoft's built-in WinUSB driver, the same thing Zadig does for Dolphin. If you've used the adapter with Dolphin before, it's already done.
 4. Plug the controller into port 1 and press **Start**.
+5. Optional, for game mode: click **Install ViGEmBus** in setup. ViGEmBus is a free driver that creates the virtual Xbox controller that emulators see. Without it, everything else still works.
 
 If the driver setup fails, you can do it by hand with [Zadig](https://zadig.akeo.ie/): pick **WUP-028** (Options → List All Devices), choose **WinUSB**, then click *Replace Driver*.
 

@@ -1430,8 +1430,9 @@ namespace GameCubeMouse
                 case Kind.Move: FlipSide(); typed = false; break;
                 case Kind.Special:
                     SendWithModifiers(k.Vk, k.Extended);
-                    navigation = k.Vk == 0x0D || k.Vk == 0x09 || k.Vk == 0x1B;
                     shift = ctrl = false;
+                    if (k.Vk == 0x0D) { HideKeyboard(true); return; }   // Enter = done typing
+                    navigation = k.Vk == 0x09 || k.Vk == 0x1B;
                     break;
                 case Kind.Combo:
                     ctrl = true;
